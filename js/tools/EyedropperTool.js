@@ -7,15 +7,24 @@ export default class EyedropperTool extends BaseTool {
 
     onPointerMove(p) {
         // Allow dragging to continuously sample colors
-        if (this.app.activePointers.size > 0) {
-            this.pick(p);
-        }
+        // Check for primary button (1) in bitmask or just existence of pointer
+        // In the new Event structure, we trust the event emission
+        this.pick(p);
     }
 
     pick(p) {
-        const color = this.app.dataAccess.getPixelColor(p.x, p.y);
+        // Only pick if mouse is actually down (tracked by BaseTool or app input)
+        // But since onPointerMove is only fired by ToolService when delegated...
+        // actually ToolService delegates move regardless of button state.
+        // We should check if the button is pressed.
+
+        if (p.originalEvent && p.originalEvent.buttons !== 1) return;
+
+        const color = this.app.services.get('project').getPixelColor(p.x, p.y);
+
         if (color) {
-            this.app.bus.emit('colorChange', color);
+            // Direct Store Update
+            this.app.store.set('primaryColor', color);
         }
     }
 }

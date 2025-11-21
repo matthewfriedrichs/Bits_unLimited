@@ -1,12 +1,13 @@
 import DomBuilder from '../utils/DomBuilder.js';
-const dom = DomBuilder.create; // Shortcut
+const dom = DomBuilder.create;
 
-export default class DialogPlugin {
+export default class DialogUI {
     init(app) {
         this.app = app;
+        this.bus = app.bus;
         this.pendingCloseId = null;
 
-        // Define UI References
+        // UI Elements
         this.projNameSpan = dom('span', { class: 'text-white font-mono' });
 
         const cancelBtn = dom('button', {
@@ -19,7 +20,7 @@ export default class DialogPlugin {
             onClick: () => this.confirm()
         }, 'Close Project');
 
-        // Build Modal Structure
+        // Modal Overlay
         this.overlay = dom('div', { class: 'fixed inset-0 bg-black/80 z-[100] hidden flex items-center justify-center p-4 backdrop-blur-sm' },
             dom('div', { class: 'bg-neutral-800 w-full max-w-sm rounded-xl shadow-2xl border border-neutral-700 overflow-hidden animate-bounce-in' },
                 dom('div', { class: 'p-5 text-center' },
@@ -41,8 +42,8 @@ export default class DialogPlugin {
 
         document.body.appendChild(this.overlay);
 
-        // Listeners
-        this.app.bus.on('requestCloseConfirmation', (data) => this.show(data));
+        // Listen for the request from ProjectService
+        this.bus.on('requestCloseConfirmation', (data) => this.show(data));
     }
 
     show({ id, name }) {
@@ -60,7 +61,8 @@ export default class DialogPlugin {
 
     confirm() {
         if (this.pendingCloseId) {
-            this.app.bus.emit('cmd_CloseProject', { id: this.pendingCloseId, force: true });
+            // Resend command with force: true
+            this.bus.emit('cmd:closeProject', { id: this.pendingCloseId, force: true });
         }
         this.hide();
     }

@@ -1,195 +1,136 @@
 import EventBus from './EventBus.js';
+import Store from './Store.js';
+import ServiceRegistry from './ServiceRegistry.js';
 
 export default class PixelApp {
     constructor() {
         this.bus = new EventBus();
+        this.store = new Store(this.bus);
+        this.services = new ServiceRegistry(this);
+
         this.canvas = document.getElementById('main-canvas');
         this.ctx = this.canvas.getContext('2d', { alpha: true });
         this.container = document.getElementById('canvas-container');
-        this.camera = { x: 0, y: 0, zoom: 20 };
-        this.activePointers = new Map();
-        this.state = { primaryColor: '#000000', tool: 'pen', activeBrush: { id: 'basic', size: 1, shape: 'square', mode: 'normal' }, currentPalette: [] };
 
-        // UPDATED DEFAULT SETTINGS: Panned mode, Size 2
-        this.settings = {
-            grid: { show: true, color: '#333333', major: 8, majorColor: '#555555', opacity: 1.0 },
-            background: {
-                mode: 'panned',     // <--- Default to Panned
-                style: 'checker',
-                color1: '#2a2a2a',
-                color2: '#1a1a1a',
-                size: 2             // <--- Default to 2px (matches pixel grid)
-            }
-        };
+        this.bgPattern = null;
 
-        this.plugins = [];
-        this.dataAccess = null;
-
-        this.initCoreEvents();
+        this._initEvents();
         this.resize();
         window.addEventListener('resize', () => this.resize());
-        requestAnimationFrame(this.loop.bind(this));
+
+        this._startRenderLoop();
     }
 
-    registerPlugin(plugin) { plugin.init(this); this.plugins.push(plugin); }
-    getDataPixel(x, y) { return this.dataAccess ? this.dataAccess.getPixelColor(x, y) : null; }
-    resize() { this.canvas.width = this.container.clientWidth; this.canvas.height = this.container.clientHeight; this.bus.emit('render', this.ctx); }
+    get state() { return this.store.state; }
+    get dataAccess() { return this.services.get('project'); }
+    get camera() { return this.store.get('camera'); }
+    get settings() { return this.store.get('settings'); }
+
+    resize() {
+        this.canvas.width = this.container.clientWidth;
+        this.canvas.height = this.container.clientHeight;
+        this.bus.emit('render', this.ctx);
+    }
 
     screenToWorld(sx, sy) {
+        const cam = this.store.get('camera');
         const rect = this.canvas.getBoundingClientRect();
-        const x = sx - rect.left; const y = sy - rect.top;
-        const wx = Math.floor((x - this.canvas.width / 2 - this.camera.x) / this.camera.zoom);
-        const wy = Math.floor((y - this.canvas.height / 2 - this.camera.y) / this.camera.zoom);
-        return { x: wx, y: wy };
+        const x = sx - rect.left;
+        const y = sy - rect.top;
+        return {
+            x: Math.floor((x - this.canvas.width / 2 - cam.x) / cam.zoom),
+            y: Math.floor((y - this.canvas.height / 2 - cam.y) / cam.zoom)
+        };
     }
 
-    initCoreEvents() {
-        this.container.addEventListener('wheel', (e) => { e.preventDefault(); this.setZoom(e.deltaY > 0 ? this.camera.zoom * 0.9 : this.camera.zoom * 1.1); }, { passive: false });
-        this.container.addEventListener('pointerdown', (e) => this.handlePointerDown(e));
-        this.container.addEventListener('pointermove', (e) => this.handlePointerMove(e));
-        this.container.addEventListener('pointerup', (e) => this.handlePointerUp(e));
-        this.container.addEventListener('pointercancel', (e) => this.handlePointerUp(e));
-        this.container.addEventListener('pointerleave', (e) => this.handlePointerUp(e));
+    _initEvents() {
+        // Prevent Right-Click Menu
+        this.container.addEventListener('contextmenu', e => e.preventDefault());
+
+        this.container.addEventListener('wheel', (e) => {
+            e.preventDefault();
+            const cam = this.store.get('camera');
+            const newZoom = Math.max(0.5, Math.min(e.deltaY > 0 ? cam.zoom * 0.9 : cam.zoom * 1.1, 100));
+            cam.zoom = newZoom;
+            this.store.set('camera', cam);
+            const display = document.getElementById('zoom-display');
+            if (display) display.innerText = Math.round(newZoom * 10) / 10 + 'x';
+        }, { passive: false });
+
+        const forward = (domEvent, name) => {
+            const worldPos = this.screenToWorld(domEvent.clientX, domEvent.clientY);
+            // Pass the 'buttons' property explicitly for ToolService
+            this.bus.emit(name, {
+                ...worldPos,
+                originalEvent: domEvent,
+                x: worldPos.x,
+                y: worldPos.y,
+                buttons: domEvent.buttons,
+                button: domEvent.button
+            });
+        };
+
+        this.container.addEventListener('pointerdown', e => {
+            e.preventDefault();
+            this.container.setPointerCapture(e.pointerId);
+            forward(e, 'input:pointerDown');
+        });
+        this.container.addEventListener('pointermove', e => {
+            e.preventDefault();
+            forward(e, 'input:pointerMove');
+        });
+        this.container.addEventListener('pointerup', e => {
+            e.preventDefault();
+            forward(e, 'input:pointerUp');
+        });
     }
 
-    setZoom(newZoom) { this.camera.zoom = Math.max(0.5, Math.min(newZoom, 100)); document.getElementById('zoom-display').innerText = Math.round(this.camera.zoom * 10) / 10 + 'x'; this.bus.emit('render', this.ctx); }
+    _startRenderLoop() {
+        const loop = () => {
+            this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
-    handlePointerDown(e) {
-        e.preventDefault(); this.container.setPointerCapture(e.pointerId);
-        this.activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY, id: e.pointerId });
-        if (this.activePointers.size === 1) {
-            if (e.button === 1 || (e.button === 0 && this.state.tool === 'pan')) { this.isDraggingMiddle = true; this.prevPinchCenter = { x: e.clientX, y: e.clientY }; }
-            else { this.drawingPointerId = e.pointerId; this.state.isDrawing = true; this.bus.emit('pointerDown', this.screenToWorld(e.clientX, e.clientY)); }
-        } else if (this.activePointers.size === 2) {
-            if (this.state.isDrawing) { this.bus.emit('pointerUp'); this.state.isDrawing = false; this.drawingPointerId = null; }
-            this.isDraggingMiddle = false; this.prevPinchDist = this.getPinchDistance(); this.prevPinchCenter = this.getPinchCenter();
-        }
-    }
+            this.bus.emit('render:background', this.ctx);
 
-    handlePointerMove(e) {
-        e.preventDefault(); if (this.activePointers.has(e.pointerId)) this.activePointers.set(e.pointerId, { x: e.clientX, y: e.clientY, id: e.pointerId });
-        if (this.activePointers.size === 2) {
-            const newDist = this.getPinchDistance(), newCenter = this.getPinchCenter();
-            if (this.prevPinchCenter) { this.camera.x += newCenter.x - this.prevPinchCenter.x; this.camera.y += newCenter.y - this.prevPinchCenter.y; }
-            if (this.prevPinchDist && newDist > 0) this.setZoom(this.camera.zoom * (newDist / this.prevPinchDist));
-            this.prevPinchDist = newDist; this.prevPinchCenter = newCenter; this.bus.emit('render', this.ctx);
-        } else if (this.activePointers.size === 1) {
-            if (this.isDraggingMiddle) {
-                this.camera.x += e.clientX - this.prevPinchCenter.x; this.camera.y += e.clientY - this.prevPinchCenter.y;
-                this.prevPinchCenter = { x: e.clientX, y: e.clientY }; this.bus.emit('render', this.ctx);
-            } else if (this.state.isDrawing && e.pointerId === this.drawingPointerId) {
-                const p = this.screenToWorld(e.clientX, e.clientY);
-                document.getElementById('coords-display').innerText = `${p.x}, ${p.y}`;
-                this.bus.emit('pointerDrag', p);
+            const cam = this.store.get('camera');
+            this.ctx.imageSmoothingEnabled = false;
+            this.ctx.save();
+            this.ctx.translate(this.canvas.width / 2 + cam.x, this.canvas.height / 2 + cam.y);
+            this.ctx.scale(cam.zoom, cam.zoom);
+
+            this.bus.emit('render', this.ctx);
+
+            if (cam.zoom > 4 && this.store.get('settings').grid.show) {
+                this._drawGrid(this.ctx, cam);
             }
-        }
+
+            this.ctx.restore();
+            requestAnimationFrame(loop);
+        };
+        requestAnimationFrame(loop);
     }
 
-    handlePointerUp(e) {
-        e.preventDefault(); this.activePointers.delete(e.pointerId);
-        try { this.container.releasePointerCapture(e.pointerId); } catch (err) { }
-        if (this.activePointers.size < 2) { this.prevPinchDist = null; this.prevPinchCenter = null; }
-        if (this.activePointers.size === 1) this.prevPinchCenter = this.getPinchCenter();
-        if (e.pointerId === this.drawingPointerId) { this.state.isDrawing = false; this.drawingPointerId = null; this.bus.emit('pointerUp'); }
-        this.isDraggingMiddle = false;
-    }
+    _drawGrid(ctx, cam) {
+        const g = this.store.get('settings').grid;
+        const w = this.canvas.width; const h = this.canvas.height;
+        const startX = Math.floor((-w / 2 - cam.x) / cam.zoom);
+        const endX = Math.floor((w / 2 - cam.x) / cam.zoom) + 1;
+        const startY = Math.floor((-h / 2 - cam.y) / cam.zoom);
+        const endY = Math.floor((h / 2 - cam.y) / cam.zoom) + 1;
 
-    getPinchDistance() { const p = Array.from(this.activePointers.values()); return Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y); }
-    getPinchCenter() { const p = Array.from(this.activePointers.values()); return p.length < 2 ? { x: 0, y: 0 } : { x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2 }; }
+        ctx.lineWidth = 1 / cam.zoom;
+        ctx.strokeStyle = g.color;
+        ctx.globalAlpha = g.opacity;
+        ctx.beginPath();
 
-    loop() {
-        this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-        this.drawBackground();
-        this.ctx.imageSmoothingEnabled = false;
-        this.ctx.save();
-        this.ctx.translate(this.canvas.width / 2 + this.camera.x, this.canvas.height / 2 + this.camera.y);
-        this.ctx.scale(this.camera.zoom, this.camera.zoom);
-        if (this.camera.zoom > 4 && this.settings.grid.show) this.drawGrid();
-        this.ctx.fillStyle = 'rgba(255,0,0,0.5)'; this.ctx.fillRect(0, 0, 1, 1);
-        this.bus.emit('render', this.ctx);
-        this.ctx.restore();
-        requestAnimationFrame(this.loop.bind(this));
-    }
-
-    drawBackground() {
-        const bg = this.settings.background;
-        const w = this.canvas.width;
-        const h = this.canvas.height;
-
-        if (bg.style === 'solid') {
-            this.ctx.fillStyle = bg.color1;
-            this.ctx.fillRect(0, 0, w, h);
-            return;
+        for (let i = startX; i <= endX; i++) {
+            if (g.major > 0 && i % g.major === 0) continue;
+            ctx.moveTo(i, startY); ctx.lineTo(i, endY);
         }
-
-        if (!this.bgPattern || this.bgKey !== JSON.stringify(bg)) {
-            const p = document.createElement('canvas');
-            p.width = bg.size * 2;
-            p.height = bg.size * 2;
-            const pctx = p.getContext('2d');
-            pctx.fillStyle = bg.color2;
-            pctx.fillRect(0, 0, bg.size * 2, bg.size * 2);
-            pctx.fillStyle = bg.color1;
-            if (bg.style === 'checker') {
-                pctx.fillRect(0, 0, bg.size, bg.size);
-                pctx.fillRect(bg.size, bg.size, bg.size, bg.size);
-            } else if (bg.style === 'dots') {
-                pctx.beginPath();
-                pctx.arc(bg.size / 2, bg.size / 2, 2, 0, Math.PI * 2);
-                pctx.arc(bg.size * 1.5, bg.size * 1.5, 2, 0, Math.PI * 2);
-                pctx.fill();
-            }
-            this.bgPattern = this.ctx.createPattern(p, 'repeat');
-            this.bgKey = JSON.stringify(bg);
+        for (let i = startY; i <= endY; i++) {
+            if (g.major > 0 && i % g.major === 0) continue;
+            ctx.moveTo(startX, i); ctx.lineTo(endX, i);
         }
-
-        this.ctx.save();
-        this.ctx.fillStyle = this.bgPattern;
-
-        if (bg.mode === 'panned') {
-            this.ctx.translate(w / 2 + this.camera.x, h / 2 + this.camera.y);
-            this.ctx.scale(this.camera.zoom, this.camera.zoom);
-
-            const invScale = 1 / this.camera.zoom;
-            const transX = w / 2 + this.camera.x;
-            const transY = h / 2 + this.camera.y;
-
-            const startX = -transX * invScale;
-            const startY = -transY * invScale;
-            const width = w * invScale;
-            const height = h * invScale;
-
-            this.ctx.fillRect(Math.floor(startX - 1), Math.floor(startY - 1), Math.ceil(width + 2), Math.ceil(height + 2));
-        } else {
-            this.ctx.fillRect(0, 0, w, h);
-        }
-        this.ctx.restore();
-    }
-
-    drawGrid() {
-        const g = this.settings.grid;
-        const startX = Math.floor((-this.canvas.width / 2 - this.camera.x) / this.camera.zoom);
-        const endX = Math.floor((this.canvas.width / 2 - this.camera.x) / this.camera.zoom) + 1;
-        const startY = Math.floor((-this.canvas.height / 2 - this.camera.y) / this.camera.zoom);
-        const endY = Math.floor((this.canvas.height / 2 - this.camera.y) / this.camera.zoom) + 1;
-
-        this.ctx.lineWidth = 1 / this.camera.zoom;
-        this.ctx.strokeStyle = g.color;
-        this.ctx.globalAlpha = g.opacity;
-        this.ctx.beginPath();
-
-        for (let i = startX; i <= endX; i++) { if (g.major > 0 && i % g.major === 0) continue; this.ctx.moveTo(i, startY); this.ctx.lineTo(i, endY); }
-        for (let i = startY; i <= endY; i++) { if (g.major > 0 && i % g.major === 0) continue; this.ctx.moveTo(startX, i); this.ctx.lineTo(endX, i); }
-        this.ctx.stroke();
-
-        if (g.major > 0) {
-            this.ctx.strokeStyle = g.majorColor;
-            this.ctx.lineWidth = 2 / this.camera.zoom;
-            this.ctx.beginPath();
-            for (let i = startX; i <= endX; i++) { if (i % g.major === 0) { this.ctx.moveTo(i, startY); this.ctx.lineTo(i, endY); } }
-            for (let i = startY; i <= endY; i++) { if (i % g.major === 0) { this.ctx.moveTo(startX, i); this.ctx.lineTo(endX, i); } }
-            this.ctx.stroke();
-        }
-        this.ctx.globalAlpha = 1.0;
+        ctx.stroke();
+        ctx.globalAlpha = 1.0;
     }
 }

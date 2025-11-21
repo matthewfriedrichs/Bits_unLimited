@@ -5,6 +5,39 @@ export default class ColorUtils {
     static hsvToRgb(h, s, v) { let r, g, b, i = Math.floor(h / 60), f = h / 60 - i, p = v * (1 - s / 100), q = v * (1 - f * s / 100), t = v * (1 - (1 - f) * s / 100); v /= 100; p /= 100; q /= 100; t /= 100; switch (i % 6) { case 0: r = v; g = t; b = p; break; case 1: r = q; g = v; b = p; break; case 2: r = p; g = v; b = t; break; case 3: r = p; g = q; b = v; break; case 4: r = t; g = p; b = v; break; case 5: r = v; g = p; b = q; break; } return { r: Math.round(r * 255), g: Math.round(g * 255), b: Math.round(b * 255) }; }
     static hexToHsv(hex) { const rgb = this.hexToRgb(hex); return this.rgbToHsv(rgb.r, rgb.g, rgb.b); }
     static hsvToHex(h, s, v) { const rgb = this.hsvToRgb(h, s, v); return this.rgbToHex(rgb.r, rgb.g, rgb.b); }
-    static getRecommendations(h, s, v) { const toHex = (h2, s2, v2) => this.hsvToHex((h2 + 360) % 360, Math.max(0, Math.min(100, s2)), Math.max(0, Math.min(100, v2))); return [{ label: "Comp", color: toHex(h + 180, s, v) }, { label: "Ana-1", color: toHex(h - 30, s, v) }, { label: "Ana-2", color: toHex(h + 30, s, v) }, { label: "Mono-1", color: toHex(h, s, v - 30) }, { label: "Mono-2", color: toHex(h, s, v + 30) }, { label: "Inv", color: this.getInversion(this.hsvToHex(h, s, v)) }]; }
+
+    static getRecommendations(h, s, v) {
+        const toHex = (h2, s2, v2) => this.hsvToHex((h2 + 360) % 360, Math.max(0, Math.min(100, s2)), Math.max(0, Math.min(100, v2)));
+
+        // Helper: Shift hue towards a target hue by a slight amount (15 degrees)
+        // This simulates warm highlights (towards yellow) and cool shadows (towards purple)
+        const shiftHue = (curr, target, amount) => {
+            let diff = target - curr;
+            // Handle Wrap Around (e.g. 350 to 10)
+            if (diff > 180) diff -= 360;
+            if (diff < -180) diff += 360;
+
+            // If we are close enough, just snap to target
+            if (Math.abs(diff) < amount) return target;
+
+            return curr + Math.sign(diff) * amount;
+        };
+
+        return [
+            { label: "Comp", color: toHex(h + 180, s, v) },
+            { label: "Ana-1", color: toHex(h - 30, s, v) },
+            { label: "Ana-2", color: toHex(h + 30, s, v) },
+            { label: "Mono-1", color: toHex(h, s, v - 30) }, // Standard Shadow
+            { label: "Mono-2", color: toHex(h, s, v + 30) }, // Standard Highlight
+
+            // New Hue-Shifted Recommendations
+            // Shade: Shift to Purple (260), Saturate (+10), Darken (-20)
+            { label: "Shade", color: toHex(shiftHue(h, 260, 15), s + 10, v - 20) },
+
+            // Tint: Shift to Yellow (60), Desaturate (-10), Lighten (+20)
+            { label: "Tint", color: toHex(shiftHue(h, 60, 15), s - 10, v + 20) }
+        ];
+    }
+
     static getInversion(hex) { const rgb = this.hexToRgb(hex); return this.rgbToHex(255 - rgb.r, 255 - rgb.g, 255 - rgb.b); }
 }

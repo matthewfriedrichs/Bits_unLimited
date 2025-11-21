@@ -10,14 +10,18 @@ export default class FrameTool extends BaseTool {
     }
 
     onPointerDown(p) {
-        const frame = this.app.dataAccess.frames[this.app.dataAccess.currentFrameIndex];
+        const projectService = this.app.services.get('project');
+        const frame = projectService.frames[projectService.currentFrameIndex];
+        if (!frame) return;
+
         const b = frame.border;
-        const handleSize = 0.5;
+        const cam = this.app.store.get('camera');
+        const handleSize = 10 / cam.zoom; // Make handle hit area responsive to zoom
 
         // Resize Handle (Bottom-Right)
         if (Math.abs(p.x - (b.x + b.w)) < handleSize && Math.abs(p.y - (b.y + b.h)) < handleSize) {
             this.isResizing = true;
-        } 
+        }
         // Move Body
         else if (p.x >= b.x && p.x <= b.x + b.w && p.y >= b.y && p.y <= b.y + b.h) {
             this.isMoving = true;
@@ -42,7 +46,7 @@ export default class FrameTool extends BaseTool {
             newRect.y = this.initialRect.y + dy;
         }
 
-        this.app.bus.emit('updateFrameBorder', newRect);
+        this.app.bus.emit('cmd:updateFrameBorder', newRect);
     }
 
     onPointerUp(p) {
