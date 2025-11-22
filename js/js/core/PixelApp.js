@@ -12,6 +12,8 @@ export default class PixelApp {
         this.ctx = this.canvas.getContext('2d', { alpha: true });
         this.container = document.getElementById('canvas-container');
 
+        this.bgPattern = null;
+
         this._initEvents();
         this.resize();
         window.addEventListener('resize', () => this.resize());
@@ -42,6 +44,7 @@ export default class PixelApp {
     }
 
     _initEvents() {
+        // Prevent Right-Click Menu
         this.container.addEventListener('contextmenu', e => e.preventDefault());
 
         this.container.addEventListener('wheel', (e) => {
@@ -56,6 +59,7 @@ export default class PixelApp {
 
         const forward = (domEvent, name) => {
             const worldPos = this.screenToWorld(domEvent.clientX, domEvent.clientY);
+            // Pass the 'buttons' property explicitly for ToolService
             this.bus.emit(name, {
                 ...worldPos,
                 originalEvent: domEvent,
@@ -114,13 +118,12 @@ export default class PixelApp {
         const endY = Math.floor((h / 2 - cam.y) / cam.zoom) + 1;
 
         ctx.lineWidth = 1 / cam.zoom;
-        ctx.globalAlpha = g.opacity;
-
-        // 1. Minor Lines
         ctx.strokeStyle = g.color;
+        ctx.globalAlpha = g.opacity;
         ctx.beginPath();
+
         for (let i = startX; i <= endX; i++) {
-            if (g.major > 0 && i % g.major === 0) continue; // Skip major positions
+            if (g.major > 0 && i % g.major === 0) continue;
             ctx.moveTo(i, startY); ctx.lineTo(i, endY);
         }
         for (let i = startY; i <= endY; i++) {
@@ -128,24 +131,6 @@ export default class PixelApp {
             ctx.moveTo(startX, i); ctx.lineTo(endX, i);
         }
         ctx.stroke();
-
-        // 2. Major Lines
-        if (g.major > 0) {
-            ctx.strokeStyle = g.majorColor;
-            ctx.beginPath();
-            // Align loop to major intervals
-            const majorStartX = Math.floor(startX / g.major) * g.major;
-            const majorStartY = Math.floor(startY / g.major) * g.major;
-
-            for (let i = majorStartX; i <= endX; i += g.major) {
-                ctx.moveTo(i, startY); ctx.lineTo(i, endY);
-            }
-            for (let i = majorStartY; i <= endY; i += g.major) {
-                ctx.moveTo(startX, i); ctx.lineTo(endX, i);
-            }
-            ctx.stroke();
-        }
-
         ctx.globalAlpha = 1.0;
     }
 }

@@ -1,8 +1,6 @@
 import BaseTool from './BaseTool.js';
 import BrushGenerator from '../utils/BrushGenerator.js';
 
-const CHUNK_SIZE = 64;
-
 export default class PenTool extends BaseTool {
     constructor(app, isEraser = false) {
         super(app);
@@ -12,10 +10,7 @@ export default class PenTool extends BaseTool {
         this.buffer = [];
         this.ppHistory = [];
 
-        // Optimization: Stroke Cache
-        // Map<"cx,cy", Canvas>
-        this.strokeChunks = new Map();
-
+        // Straight Line State
         this.isLineMode = false;
         this.lineStart = null;
         this.lineEnd = null;
@@ -40,9 +35,11 @@ export default class PenTool extends BaseTool {
         const commonSettings = [
             { id: 'size', type: 'range', label: 'Size', min: 1, max: 32, value: brush.size },
             { id: 'shape', type: 'brush-picker', label: 'Brush Shape', options: shapeOptions, value: brush.shape },
+
             { id: 'angle', type: 'range', label: 'Angle (°)', min: 0, max: 360, value: brush.angle || 0 },
             { id: 'angleJitter', type: 'range', label: 'Angle Jitter', min: 0, max: 180, value: brush.angleJitter || 0 },
             { id: 'noise', type: 'range', label: 'Noise (%)', min: 0, max: 100, value: brush.noise || 0 },
+
             { id: 'pixelPerfect', type: 'toggle', label: 'Pixel Perfect', value: brush.pixelPerfect || false }
         ];
 
@@ -73,63 +70,10 @@ export default class PenTool extends BaseTool {
         this.app.store.set(stateKey, brush);
     }
 
-    // --- Chunk Management ---
-
-    getChunk(cx, cy) {
-        const key = `${cx},${cy}`;
-        let chunk = this.strokeChunks.get(key);
-        if (!chunk) {
-            chunk = document.createElement('canvas');
-            chunk.width = CHUNK_SIZE;
-            chunk.height = CHUNK_SIZE;
-            this.strokeChunks.set(key, chunk);
-        }
-        return chunk;
-    }
-
-    updateChunkPixel(x, y, color) {
-        const cx = Math.floor(x / CHUNK_SIZE);
-        const cy = Math.floor(y / CHUNK_SIZE);
-        const chunk = this.getChunk(cx, cy);
-        const ctx = chunk.getContext('2d');
-
-        // Handle negative modulo correctly
-        const rx = ((x % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
-        const ry = ((y % CHUNK_SIZE) + CHUNK_SIZE) % CHUNK_SIZE;
-
-        if (color === null) {
-            // For visual preview of "Eraser", we can't just clearRect because 
-            // we want to show the white/redbox indicator.
-            // BUT, if this is a "Pixel Perfect Undo" (removing a pixel we just added),
-            // we *do* want to clearRect.
-            // The visuals are handled in onRender. 
-            // Actually, for optimization, we should bake the pixels into the chunk.
-
-            // If this is the Eraser Tool, we want to draw the "Eraser Indicator" pixels.
-            // If this is Undo, we want to Clear.
-            // This method handles the *visual cache*.
-
-            // Simpler approach: 
-            // If color is provided, draw it.
-            // If color is NULL (Eraser or Undo), clear it.
-            // We will handle the "Eraser Look" (white box) by drawing white pixels here.
-            // We handle "Undo" by clearing.
-
-            ctx.clearRect(rx, ry, 1, 1);
-        } else {
-            ctx.fillStyle = color;
-            ctx.fillRect(rx, ry, 1, 1);
-        }
-    }
-
-    // --- Input ---
-
     onPointerDown(p) {
         this.strokePixels.clear();
         this.buffer = [];
         this.ppHistory = [];
-        this.strokeChunks.clear(); // Clear visual cache
-
         this.lastPos = { x: p.x, y: p.y };
 
         if (p.originalEvent && (p.originalEvent.ctrlKey || p.originalEvent.metaKey)) {
@@ -152,23 +96,39 @@ export default class PenTool extends BaseTool {
             let tx = p.x;
             let ty = p.y;
 
+            // Shift Key -> Snap to 8-way AND Isometric (2:1 slopes)
             if (p.originalEvent && p.originalEvent.shiftKey && this.lineStart) {
                 const dx = p.x - this.lineStart.x;
                 const dy = p.y - this.lineStart.y;
                 const angle = Math.atan2(dy, dx);
                 const dist = Math.sqrt(dx * dx + dy * dy);
 
+                // Define valid angles (Cardinal + Diagonal + Isometric)
+                // Iso 1: Slope 0.5 (26.565°) | Iso 2: Slope 2.0 (63.435°)
                 const iso1 = Math.atan(0.5);
                 const iso2 = Math.atan(2);
+
+                // All 16 valid angles in radians (-PI to PI)
                 const snapAngles = [
+                    // Cardinals
                     0, Math.PI / 2, Math.PI, -Math.PI / 2,
+                    // Diagonals
                     Math.PI / 4, 3 * Math.PI / 4, -3 * Math.PI / 4, -Math.PI / 4,
-                    iso1, iso2, Math.PI - iso1, Math.PI - iso2, -Math.PI + iso1, -Math.PI + iso2, -iso1, -iso2
+                    // Isometric Q1
+                    iso1, iso2,
+                    // Isometric Q2
+                    Math.PI - iso1, Math.PI - iso2,
+                    // Isometric Q3
+                    -Math.PI + iso1, -Math.PI + iso2,
+                    // Isometric Q4
+                    -iso1, -iso2
                 ];
 
+                // Find closest angle
                 let closest = 0;
                 let minDiff = Infinity;
 
+                // Normalize check to handle PI/-PI wrapping
                 const normalize = (a) => {
                     while (a > Math.PI) a -= 2 * Math.PI;
                     while (a <= -Math.PI) a += 2 * Math.PI;
@@ -177,9 +137,13 @@ export default class PenTool extends BaseTool {
 
                 snapAngles.forEach(a => {
                     let diff = Math.abs(normalize(angle - a));
-                    if (diff < minDiff) { minDiff = diff; closest = a; }
+                    if (diff < minDiff) {
+                        minDiff = diff;
+                        closest = a;
+                    }
                 });
 
+                // Project new point
                 tx = Math.round(this.lineStart.x + Math.cos(closest) * dist);
                 ty = Math.round(this.lineStart.y + Math.sin(closest) * dist);
             }
@@ -201,6 +165,7 @@ export default class PenTool extends BaseTool {
         this.isLineMode = false;
         this.lineStart = null;
         this.lineEnd = null;
+
         this.commit();
     }
 
@@ -245,8 +210,6 @@ export default class PenTool extends BaseTool {
             const removed = this.buffer.splice(this.buffer.length - last.pixelCount, last.pixelCount);
             removed.forEach(p => {
                 this.strokePixels.delete(`${p.x},${p.y}`);
-                // Clear from visual cache
-                this.updateChunkPixel(p.x, p.y, null);
             });
         }
     }
@@ -274,7 +237,8 @@ export default class PenTool extends BaseTool {
         for (const pt of footprint) {
             if (brush.noise > 0 && (Math.random() * 100) < brush.noise) continue;
 
-            let tx = pt.x, ty = pt.y;
+            let tx = pt.x;
+            let ty = pt.y;
             if (hasRotation) {
                 tx = Math.round(pt.x * cos - pt.y * sin);
                 ty = Math.round(pt.x * sin + pt.y * cos);
@@ -290,7 +254,7 @@ export default class PenTool extends BaseTool {
             let shouldDraw = true;
 
             if (this.isEraser) {
-                finalColor = null; // Eraser Logic
+                finalColor = null;
             } else {
                 if (brush.mode === 'dither') {
                     if ((Math.abs(x) + Math.abs(y)) % 2 !== 0) shouldDraw = false;
@@ -313,16 +277,6 @@ export default class PenTool extends BaseTool {
             if (shouldDraw) {
                 this.strokePixels.add(key);
                 this.buffer.push({ x, y, color: finalColor });
-
-                // Update Visual Cache
-                // For Eraser, we draw a "Visual" representation (White with opacity)
-                // For Pen, we draw the color.
-                if (this.isEraser) {
-                    this.updateChunkPixel(x, y, 'rgba(255,255,255,0.7)');
-                } else {
-                    this.updateChunkPixel(x, y, finalColor);
-                }
-
                 addedCount++;
             }
         }
@@ -336,39 +290,43 @@ export default class PenTool extends BaseTool {
             }));
             this.app.bus.emit('requestBatchPixels', payload);
             this.buffer = [];
-            this.strokeChunks.clear(); // Clear Cache
         }
     }
 
     onRender(ctx) {
-        // 1. Draw Cached Chunks (Optimized)
-        if (this.strokeChunks.size > 0) {
+        if (this.buffer.length > 0) {
             ctx.save();
-            // View Culling logic inside tool? Or just draw all?
-            // Since stroke is usually small compared to world, iterating all keys is fine.
-            // But key parsing is slow.
-
-            for (const [key, chunk] of this.strokeChunks) {
-                const [cx, cy] = key.split(',').map(Number);
-                ctx.drawImage(chunk, cx * CHUNK_SIZE, cy * CHUNK_SIZE);
+            for (const p of this.buffer) {
+                if (p.color === null) {
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+                    ctx.fillRect(p.x, p.y, 1, 1);
+                    ctx.strokeStyle = 'rgba(0, 0, 0, 0.2)';
+                    ctx.strokeRect(p.x, p.y, 1, 1);
+                } else {
+                    ctx.fillStyle = p.color;
+                    ctx.fillRect(p.x, p.y, 1, 1);
+                }
             }
             ctx.restore();
         }
 
-        // 2. Draw Line Guide
         if (this.isLineMode && this.lineStart && this.lineEnd) {
             ctx.save();
             const zoom = this.app.store.get('camera').zoom;
+
             ctx.beginPath();
             ctx.moveTo(this.lineStart.x + 0.5, this.lineStart.y + 0.5);
             ctx.lineTo(this.lineEnd.x + 0.5, this.lineEnd.y + 0.5);
+
             ctx.lineWidth = 2 / zoom;
             ctx.strokeStyle = this.isEraser ? '#ff0000' : '#000000';
             ctx.setLineDash([5 / zoom, 5 / zoom]);
             ctx.stroke();
+
             ctx.strokeStyle = '#ffffff';
             ctx.lineDashOffset = 5 / zoom;
             ctx.stroke();
+
             ctx.restore();
         }
     }
