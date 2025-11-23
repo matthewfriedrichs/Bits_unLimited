@@ -3,7 +3,6 @@ import { AddBorderCommand, UpdateBorderCommand, DeleteBorderCommand } from '../c
 import { ToolIcon, ToolSidebar } from '../ui/components/ToolDef.js';
 
 export default class BorderTool extends BaseTool {
-    // ... constructor and iconDef ...
     constructor(app) {
         super(app);
         this.selectedBorderId = null;
@@ -58,8 +57,9 @@ export default class BorderTool extends BaseTool {
             });
 
             if (selected.type === 'effect') {
-                // DYNAMIC EFFECT LOADING
                 const effectService = this.app.services.get('effects');
+
+                // 1. Effect Selector
                 const effectOptions = [
                     { id: 'none', label: 'None' },
                     ...effectService.getAvailableEffects().map(e => ({ id: e.id, label: e.name }))
@@ -70,16 +70,45 @@ export default class BorderTool extends BaseTool {
                     options: effectOptions
                 });
 
-                // NEW: Add Slider for Wave Effect
-                if (selected.effect === 'wave') {
-                    ui.addSlider({
-                        id: 'effectValue',
-                        label: 'Phase',
-                        min: 0,
-                        max: 100,
-                        value: selected.effectValue || 0,
-                        step: 1
-                    });
+                // 2. Dynamic Controls
+                const activeEffect = effectService.get(selected.effect);
+                if (activeEffect && activeEffect.instance && activeEffect.instance.getControls) {
+                    // Ask the effect what controls it needs
+                    const controls = activeEffect.instance.getControls(selected);
+
+                    if (controls.length > 0) {
+                        ui.addHeader('Effect Settings');
+
+                        controls.forEach(ctrl => {
+                            // Map the control definition to ToolSidebar methods
+                            // We use the ID from the control object to map to the border property
+                            if (ctrl.type === 'slider') {
+                                ui.addSlider({
+                                    id: ctrl.id,
+                                    label: ctrl.label,
+                                    min: ctrl.min,
+                                    max: ctrl.max,
+                                    step: ctrl.step,
+                                    value: selected[ctrl.id] !== undefined ? selected[ctrl.id] : ctrl.default
+                                });
+                            }
+                            else if (ctrl.type === 'number') {
+                                ui.addInput({
+                                    id: ctrl.id,
+                                    label: ctrl.label,
+                                    type: 'number',
+                                    value: selected[ctrl.id] !== undefined ? selected[ctrl.id] : ctrl.default
+                                });
+                            }
+                            else if (ctrl.type === 'color') {
+                                ui.addColor({
+                                    id: ctrl.id,
+                                    label: ctrl.label,
+                                    value: selected[ctrl.id] !== undefined ? selected[ctrl.id] : ctrl.default
+                                });
+                            }
+                        });
+                    }
                 }
             }
 
@@ -95,7 +124,6 @@ export default class BorderTool extends BaseTool {
         return ui;
     }
 
-    // ... setSetting, deleteSelected, and interaction methods remain unchanged ...
     setSetting(key, val) {
         if (this.selectedBorderId) {
             const projectService = this.app.services.get('project');
@@ -114,8 +142,7 @@ export default class BorderTool extends BaseTool {
         }
     }
 
-    // ... (Keep deleteSelected, onPointerDown, onPointerMove, onPointerUp, renameBorder, cycleBorderType, onRender) ...
-    // I will omit them for brevity as they are unchanged from the previous fix.
+    // ... (rest of class: deleteSelected, onPointerDown, etc. unchanged) ...
     deleteSelected() {
         if (this.selectedBorderId) {
             this.app.services.get('history').execute(new DeleteBorderCommand(this.app, this.selectedBorderId));
@@ -123,7 +150,6 @@ export default class BorderTool extends BaseTool {
             this.app.bus.emit('cmd:setToolSetting', { toolId: 'frame' });
         }
     }
-    // ... (Interaction logic from previous turn) ...
     onPointerDown(p) {
         const projectService = this.app.services.get('project');
         const project = projectService.activeProject;

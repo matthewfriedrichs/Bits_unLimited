@@ -1,8 +1,16 @@
 export default class WaveEffect {
+    getControls() {
+        return [
+            { type: 'slider', id: 'effectValue', label: 'Phase', min: 0, max: 100, value: 0, step: 1, default: 0 },
+            { type: 'slider', id: 'amplitude', label: 'Amount', min: 0, max: 20, value: 4, step: 1, default: 4 },
+            // NEW: Frequency (Cycles) Slider
+            // Step 1 ensures we lock to integers for perfect seamless tiling
+            { type: 'slider', id: 'frequency', label: 'Freq', min: 1, max: 10, value: 1, step: 1, default: 1 }
+        ];
+    }
+
     apply({ ctx, border, renderService, width, height, camera }) {
         const zoom = camera.zoom;
-
-        // 1. Calculate Screen Coordinates
         const sx = Math.floor((border.x * zoom) + (width / 2 + camera.x));
         const sy = Math.floor((border.y * zoom) + (height / 2 + camera.y));
         const sw = Math.ceil(border.w * zoom);
@@ -10,7 +18,6 @@ export default class WaveEffect {
 
         if (sw < 1 || sh < 1) return;
 
-        // 2. Capture Source
         const pCan = document.createElement('canvas');
         pCan.width = sw;
         pCan.height = sh;
@@ -19,39 +26,37 @@ export default class WaveEffect {
 
         ctx.save();
         ctx.setTransform(1, 0, 0, 1, 0, 0);
-
-        // 3. Clear Destination Area
         ctx.clearRect(sx, sy, sw, sh);
         ctx.beginPath();
         ctx.rect(sx, sy, sw, sh);
         ctx.clip();
 
-        // 4. Calculate Wave Parameters
-        // We map the slider (0-100) to a full radian cycle (0 to 2PI)
-        // This allows the user to "scrub" through the wave phase.
+        // PARAMS
         const sliderVal = (border.effectValue !== undefined) ? border.effectValue : 0;
         const phase = (sliderVal / 100) * (Math.PI * 2);
-        
-        const amplitude = 4; // Max distortion in WORLD pixels
-        const frequency = 0.5; 
 
-        // 5. Draw Slices
+        const amplitude = (border.amplitude !== undefined) ? border.amplitude : 4;
+
+        // NEW: Frequency Logic
+        // Default to 1 cycle if undefined
+        const cycles = (border.frequency !== undefined) ? border.frequency : 1;
+
+        // Calculate angular frequency so that 'cycles' # of waves fit exactly in border.h
+        // Formula: (2 * PI * cycles) / totalHeight
+        // We use border.h (World Height) to keep the wave consistent regardless of zoom
+        const angularFrequency = (Math.PI * 2 * cycles) / border.h;
+
         for (let y = 0; y < sh; y++) {
-            // Convert screen Y to world Y to calculate the physics of the wave
-            // This ensures the wave shape doesn't change just because you zoomed in
             const worldY = Math.floor(y / zoom);
-            
-            // Calculate offset, round to nearest integer for "Pixel Perfect" look
-            const worldOffset = Math.round(Math.sin(worldY * frequency + phase) * amplitude);
-            
-            // Scale back up to screen space
-            const screenOffset = worldOffset * zoom;
 
-            ctx.drawImage(
-                pCan,
-                0, y, sw, 1,               // Source Slice
-                sx + screenOffset, sy + y, sw, 1 // Dest Slice
-            );
+            let screenOffset = 0;
+            if (amplitude > 0) {
+                // Use the calculated angular frequency
+                const worldOffset = Math.round(Math.sin(worldY * angularFrequency + phase) * amplitude);
+                screenOffset = worldOffset * zoom;
+            }
+
+            ctx.drawImage(pCan, 0, y, sw, 1, sx + screenOffset, sy + y, sw, 1);
         }
 
         ctx.restore();

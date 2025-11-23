@@ -24,6 +24,7 @@ import PixelateEffect from './effects/PixelateEffect.js';
 import TiledEffect from './effects/TiledEffect.js';
 import WobbleEffect from './effects/WobbleEffect.js';
 import WaveEffect from './effects/WaveEffect.js';
+import ColorCycleEffect from './effects/ColorCycleEffect.js';
 
 // UI (Views)
 import ToolbarUI from './ui/ToolbarUI.js';
@@ -59,6 +60,7 @@ window.onload = () => {
     effectRegistry.register('tiled', 'Tiled Mode', new TiledEffect());
     effectRegistry.register('wobble', 'Wobble', new WobbleEffect());
     effectRegistry.register('wave', 'Wave', new WaveEffect());
+    effectRegistry.register('cycle', 'Color Cycling', new ColorCycleEffect());
 
     // Register Tools
     toolService.register('pen', new BrushTool(app));
