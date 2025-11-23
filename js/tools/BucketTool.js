@@ -1,4 +1,6 @@
 import BaseTool from './BaseTool.js';
+import { PixelBatchCommand } from '../commands/PixelCommands.js';
+import { ToolIcon, ToolSidebar } from '../ui/components/ToolDef.js';
 
 export default class BucketTool extends BaseTool {
     constructor(app) {
@@ -6,35 +8,70 @@ export default class BucketTool extends BaseTool {
         this.currentSlot = 'primary';
     }
 
-    get availableModes() {
-        return [
-            { id: 'normal', label: 'Normal Fill', icon: 'fill-drip', color: 'text-amber-400', desc: 'Exact fill within bounds' },
-            { id: 'smart', label: 'Smart Fill', icon: 'wand-magic-sparkles', color: 'text-fuchsia-400', desc: 'Auto-closes gaps in shapes' }
-        ];
+    // --- UI Definitions ---
+
+    get iconDef() {
+        return new ToolIcon({
+            icon: 'fill-drip',
+            label: 'Fill Tool',
+            color: 'text-amber-400',
+            hotkey: 'G'
+        });
     }
 
-    getSettings(slot = 'primary') {
-        const config = this.app.store.get(slot === 'primary' ? 'primarySettings' : 'secondarySettings').bucket;
-        return [
-            { id: 'diagonal', type: 'toggle', label: 'Diagonal (8-way)', value: config.diagonal }
-        ];
+    get sidebarDef() {
+        const storeKey = this.currentSlot === 'primary' ? 'primarySettings' : 'secondarySettings';
+        const settings = this.app.store.get(storeKey) || { bucket: { mode: 'normal', diagonal: false } };
+        const config = settings.bucket || { mode: 'normal', diagonal: false };
+
+        return new ToolSidebar()
+            .addHeader('Fill Settings')
+            .addSelect({
+                id: 'mode',
+                label: 'Fill Mode',
+                value: config.mode,
+                options: [
+                    { id: 'normal', label: 'Normal' },
+                    { id: 'smart', label: 'Smart (Close Gaps)' }
+                ]
+            })
+            .addToggle({
+                id: 'diagonal',
+                label: '8-Way Connect',
+                value: config.diagonal
+            });
     }
 
-    setSetting(key, val, slot = 'primary') {
-        const storeKey = slot === 'primary' ? 'primarySettings' : 'secondarySettings';
-        const settings = { ...this.app.store.get(storeKey) };
-        settings.bucket = { ...settings.bucket, [key]: val };
-        this.app.store.set(storeKey, settings);
-    }
-
-    setMode(modeId) {
+    setSetting(key, val) {
         const storeKey = this.currentSlot === 'primary' ? 'primarySettings' : 'secondarySettings';
         const settings = { ...this.app.store.get(storeKey) };
-        settings.bucket = { ...settings.bucket, mode: modeId };
+        if (!settings.bucket) settings.bucket = {};
+        settings.bucket[key] = val;
         this.app.store.set(storeKey, settings);
-
-        this.app.bus.emit('tool:modeChanged', { toolId: 'bucket', mode: modeId });
+        if (key === 'mode') {
+            this.app.bus.emit('tool:modeChanged', { toolId: 'bucket', mode: val });
+        }
     }
+
+    // --- Helper: Check for Tiled Border ---
+    _getTiledBorder(x, y) {
+        const project = this.app.store.activeProject;
+        if (!project) return null;
+        const frame = project.frames[project.currentFrameIndex];
+        const borders = frame.borders || (frame.border ? [frame.border] : []);
+
+        // Check distinct borders in reverse order (top-most first)
+        for (let i = borders.length - 1; i >= 0; i--) {
+            const b = borders[i];
+            // Only apply logic if effect is specifically 'tiled'
+            if (b.effect === 'tiled' && x >= b.x && x < b.x + b.w && y >= b.y && y < b.y + b.h) {
+                return b;
+            }
+        }
+        return null;
+    }
+
+    // --- Logic ---
 
     onPointerDown(p) {
         this.currentSlot = (p.button === 2) ? 'secondary' : 'primary';
@@ -48,39 +85,53 @@ export default class BucketTool extends BaseTool {
 
         if (targetColor === replacementColor) return;
 
-        // 1. Calculate Safe Bounds
-        // Optimization: We restrict the fill to the area occupied by the layer + padding
-        let minX = startX, maxX = startX, minY = startY, maxY = startY;
+        // 1. Determine Bounds and Tiled Mode
+        let bounds;
+        let isTiled = false;
+        const tiledBorder = this._getTiledBorder(startX, startY);
 
-        if (projectService.activeProject) {
-            const frame = projectService.frames[projectService.currentFrameIndex];
-            const layer = frame.layers.find(l => l.id === projectService.activeLayerId);
-            if (layer) {
-                for (const key of layer.data.keys()) {
-                    const [px, py] = key.split(',').map(Number);
-                    if (px < minX) minX = px;
-                    if (px > maxX) maxX = px;
-                    if (py < minY) minY = py;
-                    if (py > maxY) maxY = py;
+        if (tiledBorder) {
+            // Tiled Mode: Restrict bounds exactly to the border
+            bounds = {
+                minX: tiledBorder.x,
+                maxX: tiledBorder.x + tiledBorder.w - 1,
+                minY: tiledBorder.y,
+                maxY: tiledBorder.y + tiledBorder.h - 1,
+                width: tiledBorder.w,
+                height: tiledBorder.h
+            };
+            isTiled = true;
+        } else {
+            // Normal Mode: Calculate bounds based on content
+            let minX = startX, maxX = startX, minY = startY, maxY = startY;
+            if (projectService.activeProject) {
+                const frame = projectService.frames[projectService.currentFrameIndex];
+                const layer = frame.layers.find(l => l.id === projectService.activeLayerId);
+                if (layer) {
+                    for (const key of layer.data.keys()) {
+                        const [px, py] = key.split(',').map(Number);
+                        if (px < minX) minX = px; if (px > maxX) maxX = px;
+                        if (py < minY) minY = py; if (py > maxY) maxY = py;
+                    }
                 }
             }
+            const PADDING = 64;
+            bounds = {
+                minX: minX - PADDING, maxX: maxX + PADDING,
+                minY: minY - PADDING, maxY: maxY + PADDING,
+                width: (maxX + PADDING) - (minX - PADDING) + 1,
+                height: (maxY + PADDING) - (minY - PADDING) + 1
+            };
         }
 
-        const PADDING = 64;
-        const bounds = {
-            minX: minX - PADDING, maxX: maxX + PADDING,
-            minY: minY - PADDING, maxY: maxY + PADDING,
-            width: (maxX + PADDING) - (minX - PADDING) + 1,
-            height: (maxY + PADDING) - (minY - PADDING) + 1
-        };
-
-        // 2. Create Grid (0=Walkable, 1=Wall, 2=Filled)
+        // 2. Initialize Grid
+        // 0 = Empty/Target (Fillable), 1 = Blocked (Different Color), 2 = Visited
         const grid = new Uint8Array(bounds.width * bounds.height);
         const frame = projectService.frames[projectService.currentFrameIndex];
         const layer = frame.layers.find(l => l.id === projectService.activeLayerId);
 
         if (targetColor === null) {
-            // Empty Target: Everything existing is a Wall
+            // Filling empty space: existing pixels are obstacles
             if (layer) {
                 for (const key of layer.data.keys()) {
                     const [px, py] = key.split(',').map(Number);
@@ -88,7 +139,7 @@ export default class BucketTool extends BaseTool {
                 }
             }
         } else {
-            // Color Target: Everything NOT target is a Wall
+            // Replacing color: everything is blocked (1) unless it matches target (0)
             grid.fill(1);
             if (layer) {
                 for (const [key, color] of layer.data.entries()) {
@@ -100,83 +151,102 @@ export default class BucketTool extends BaseTool {
             }
         }
 
-        // 3. Apply Smart Mode
-        const config = this.app.store.get(this.currentSlot === 'primary' ? 'primarySettings' : 'secondarySettings').bucket;
-        if (config.mode === 'smart') {
+        const storeKey = this.currentSlot === 'primary' ? 'primarySettings' : 'secondarySettings';
+        const settings = this.app.store.get(storeKey) || { bucket: { mode: 'normal', diagonal: false } };
+        const config = settings.bucket || { mode: 'normal', diagonal: false };
+
+        // Disable Smart Fill in Tiled Mode (complexity trade-off)
+        if (config.mode === 'smart' && !isTiled) {
             this.closeGapsRaycast(grid, bounds, startX, startY);
         }
 
-        // 4. Scanline Flood Fill
-        // Uses 'grid' directly: 0 -> 2 (Filled)
-        this.scanlineFill(grid, bounds, startX, startY, config.diagonal);
+        // 3. Run Fill
+        this.scanlineFill(grid, bounds, startX, startY, config.diagonal, isTiled);
 
-        // 5. Commit
-        const pixels = [];
-        // Iterate grid to find filled pixels (marked as 2)
+        // 4. Commit Changes
+        const pixelUpdates = [];
+        const activeLayerId = projectService.activeLayerId;
+        const currentFrameIndex = projectService.currentFrameIndex;
+
         for (let i = 0; i < grid.length; i++) {
-            if (grid[i] === 2) {
+            if (grid[i] === 2) { // Visited
                 const x = (i % bounds.width) + bounds.minX;
                 const y = Math.floor(i / bounds.width) + bounds.minY;
-                pixels.push({ x, y, color: replacementColor });
+                const oldColor = projectService.getPixelColor(x, y);
+
+                pixelUpdates.push({
+                    x, y,
+                    color: replacementColor,
+                    oldColor: oldColor,
+                    layerId: activeLayerId,
+                    frameIndex: currentFrameIndex
+                });
             }
         }
 
-        if (pixels.length > 0) {
-            this.app.bus.emit('requestBatchPixels', pixels);
+        if (pixelUpdates.length > 0) {
+            const history = this.app.services.get('history');
+            history.execute(new PixelBatchCommand(this.app, pixelUpdates));
         }
     }
 
-    // --- New Scanline Algorithm ---
-    scanlineFill(grid, bounds, startX, startY, diagonal) {
+    scanlineFill(grid, bounds, startX, startY, diagonal, isTiled = false) {
         const w = bounds.width;
         const h = bounds.height;
-
-        // Local coordinates
+        // Convert world start pos to local grid pos
         const lx = startX - bounds.minX;
         const ly = startY - bounds.minY;
 
         const startIdx = ly * w + lx;
-        if (grid[startIdx] !== 0) return; // Hit wall or OOB
+        if (startIdx < 0 || startIdx >= grid.length || grid[startIdx] !== 0) return;
 
-        // Stack of seed points (just indexes)
         const stack = [startIdx];
 
         while (stack.length > 0) {
             let idx = stack.pop();
-
-            // Move Up to find top edge of span (if we popped from below) 
-            // OR just process. Standard scanline processes the popped pixel's row.
-
-            // 1. Check if valid
             if (grid[idx] !== 0) continue;
 
-            // 2. Find Left Edge of Span
             let currX = idx % w;
             let currY = Math.floor(idx / w);
 
-            // Move Left
+            // Find Left Edge of scanline segment
             let leftIdx = idx;
             while (currX > 0 && grid[leftIdx - 1] === 0) {
                 leftIdx--;
                 currX--;
             }
 
-            // 3. Scan Right, Filling and Seeding
-            // We scan from Left Edge until we hit a wall on the Right
+            // TILED: Check Left Wrap
+            // If we hit the left edge (currX === 0) and it's tiled, 
+            // check if the rightmost pixel (w-1) is fillable.
+            if (isTiled && currX === 0) {
+                const wrapX = w - 1;
+                const wrapIdx = currY * w + wrapX;
+                if (grid[wrapIdx] === 0) stack.push(wrapIdx);
+            }
+
+            // Scan Right
             let rightIdx = leftIdx;
             let rX = currX;
-
-            // Flags to track if we need to seed a new span above/below
             let seedAbove = false;
             let seedBelow = false;
 
             while (rX < w && grid[rightIdx] === 0) {
-                // FILL PIXEL
-                grid[rightIdx] = 2;
+                grid[rightIdx] = 2; // Mark Visited
 
-                // Check Row Above
+                // Check Up
+                let checkUp = false;
+                let upIdx = -1;
                 if (currY > 0) {
-                    const upIdx = rightIdx - w;
+                    checkUp = true;
+                    upIdx = rightIdx - w;
+                } else if (isTiled) {
+                    // Wrap Y Up: Top row checks Bottom row
+                    checkUp = true;
+                    upIdx = (h - 1) * w + rX;
+                }
+
+                if (checkUp) {
                     const isWalkable = grid[upIdx] === 0;
                     if (!seedAbove && isWalkable) {
                         stack.push(upIdx);
@@ -186,9 +256,19 @@ export default class BucketTool extends BaseTool {
                     }
                 }
 
-                // Check Row Below
+                // Check Down
+                let checkDown = false;
+                let downIdx = -1;
                 if (currY < h - 1) {
-                    const downIdx = rightIdx + w;
+                    checkDown = true;
+                    downIdx = rightIdx + w;
+                } else if (isTiled) {
+                    // Wrap Y Down: Bottom row checks Top row
+                    checkDown = true;
+                    downIdx = rX; // 0 * w + rX
+                }
+
+                if (checkDown) {
                     const isWalkable = grid[downIdx] === 0;
                     if (!seedBelow && isWalkable) {
                         stack.push(downIdx);
@@ -198,66 +278,41 @@ export default class BucketTool extends BaseTool {
                     }
                 }
 
-                // Check Diagonals (If Enabled)
-                if (diagonal) {
-                    // If we are at a wall boundary above/below, and diagonal is open, push it
-                    // Simple hack: Just push diagonals if they are 0. The main loop handles validity.
-                    // This is less efficient than pure scanline but works for 8-way.
+                // TILED: Check Right Wrap
+                // If we are at the right edge, check the left edge
+                if (isTiled && rX === w - 1) {
+                    const wrapX = 0;
+                    const wrapIdx = currY * w + wrapX;
+                    if (grid[wrapIdx] === 0) stack.push(wrapIdx);
+                }
+
+                // Diagonal Handling (Simplified for standard fill, ignored for Tiled to prevent leaks for now)
+                if (diagonal && !isTiled) {
                     if (currY > 0) {
-                        if (rX > 0 && grid[rightIdx - w - 1] === 0) stack.push(rightIdx - w - 1); // Up-Left
-                        if (rX < w - 1 && grid[rightIdx - w + 1] === 0) stack.push(rightIdx - w + 1); // Up-Right
+                        if (rX > 0 && grid[rightIdx - w - 1] === 0) stack.push(rightIdx - w - 1);
+                        if (rX < w - 1 && grid[rightIdx - w + 1] === 0) stack.push(rightIdx - w + 1);
                     }
                     if (currY < h - 1) {
-                        if (rX > 0 && grid[rightIdx + w - 1] === 0) stack.push(rightIdx + w - 1); // Down-Left
-                        if (rX < w - 1 && grid[rightIdx + w + 1] === 0) stack.push(rightIdx + w + 1); // Down-Right
+                        if (rX > 0 && grid[rightIdx + w - 1] === 0) stack.push(rightIdx + w - 1);
+                        if (rX < w - 1 && grid[rightIdx + w + 1] === 0) stack.push(rightIdx + w + 1);
                     }
                 }
 
-                // Move Right
                 rightIdx++;
                 rX++;
             }
         }
     }
 
-    // --- Raycast Logic (Unchanged) ---
     closeGapsRaycast(grid, bounds, startX, startY) {
         const RAYS = 32; const hits = []; const cx = startX - bounds.minX; const cy = startY - bounds.minY;
         let validHitDistSum = 0; let validHitCount = 0; let minValidDist = Infinity;
-        for (let i = 0; i < RAYS; i++) {
-            const angle = (i / RAYS) * Math.PI * 2;
-            const hit = this.castRay(grid, bounds, cx, cy, Math.cos(angle), Math.sin(angle));
-            hits.push(hit);
-            if (hit.found) { validHitDistSum += hit.dist; validHitCount++; if (hit.dist < minValidDist) minValidDist = hit.dist; }
-        }
-        if (validHitCount < 3) return;
-        const leakThreshold = Math.max(minValidDist * 3.5, 8);
-        for (let i = 0; i < RAYS; i++) {
-            const curr = hits[i]; const nextIdx = (i + 1) % RAYS; const next = hits[nextIdx]; const isLeak = (h) => !h.found || h.dist > leakThreshold;
-            if (!isLeak(curr) && isLeak(next)) {
-                let gapEndIdx = nextIdx;
-                while (isLeak(hits[gapEndIdx]) && gapEndIdx !== i) { gapEndIdx = (gapEndIdx + 1) % RAYS; }
-                if (!isLeak(hits[gapEndIdx]) && gapEndIdx !== i) { this.drawLine(grid, bounds.width, curr.x, curr.y, hits[gapEndIdx].x, hits[gapEndIdx].y); }
-            }
-        }
+        for (let i = 0; i < RAYS; i++) { const angle = (i / RAYS) * Math.PI * 2; const hit = this.castRay(grid, bounds, cx, cy, Math.cos(angle), Math.sin(angle)); hits.push(hit); if (hit.found) { validHitDistSum += hit.dist; validHitCount++; if (hit.dist < minValidDist) minValidDist = hit.dist; } }
+        if (validHitCount < 3) return; const leakThreshold = Math.max(minValidDist * 3.5, 8);
+        for (let i = 0; i < RAYS; i++) { const curr = hits[i]; const nextIdx = (i + 1) % RAYS; const next = hits[nextIdx]; const isLeak = (h) => !h.found || h.dist > leakThreshold; if (!isLeak(curr) && isLeak(next)) { let gapEndIdx = nextIdx; while (isLeak(hits[gapEndIdx]) && gapEndIdx !== i) { gapEndIdx = (gapEndIdx + 1) % RAYS; } if (!isLeak(hits[gapEndIdx]) && gapEndIdx !== i) { this.drawLine(grid, bounds.width, curr.x, curr.y, hits[gapEndIdx].x, hits[gapEndIdx].y); } } }
     }
-    castRay(grid, bounds, startX, startY, dx, dy) {
-        let x = startX, y = startY, dist = 0; const maxDist = Math.max(bounds.width, bounds.height);
-        while (dist < maxDist) {
-            const ix = Math.round(x); const iy = Math.round(y);
-            if (ix < 0 || ix >= bounds.width || iy < 0 || iy >= bounds.height) return { found: false, dist, x: ix, y: iy };
-            if (grid[iy * bounds.width + ix] === 1) return { found: true, dist, x: ix, y: iy };
-            x += dx; y += dy; dist++;
-        } return { found: false, dist, x, y };
-    }
-    drawLine(grid, w, x0, y0, x1, y1) {
-        let dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0); let sx = (x0 < x1) ? 1 : -1, sy = (y0 < y1) ? 1 : -1; let err = dx - dy;
-        while (true) {
-            const idx = y0 * w + x0; if (idx >= 0 && idx < grid.length) grid[idx] = 1;
-            if (x0 === x1 && y0 === y1) break;
-            let e2 = 2 * err; if (e2 > -dy) { err -= dy; x0 += sx; } if (e2 < dx) { err += dx; y0 += sy; }
-        }
-    }
+    castRay(grid, bounds, startX, startY, dx, dy) { let x = startX, y = startY, dist = 0; const maxDist = Math.max(bounds.width, bounds.height); while (dist < maxDist) { const ix = Math.round(x); const iy = Math.round(y); if (ix < 0 || ix >= bounds.width || iy < 0 || iy >= bounds.height) return { found: false, dist, x: ix, y: iy }; if (grid[iy * bounds.width + ix] === 1) return { found: true, dist, x: ix, y: iy }; x += dx; y += dy; dist++; } return { found: false, dist, x, y }; }
+    drawLine(grid, w, x0, y0, x1, y1) { let dx = Math.abs(x1 - x0), dy = Math.abs(y1 - y0); let sx = (x0 < x1) ? 1 : -1, sy = (y0 < y1) ? 1 : -1; let err = dx - dy; while (true) { const idx = y0 * w + x0; if (idx >= 0 && idx < grid.length) grid[idx] = 1; if (x0 === x1 && y0 === y1) break; let e2 = 2 * err; if (e2 > -dy) { err -= dy; x0 += sx; } if (e2 < dx) { err += dx; y0 += sy; } } }
     inBounds(x, y, b) { return x >= b.minX && x <= b.maxX && y >= b.minY && y <= b.maxY; }
     idx(x, y, b) { return (y - b.minY) * b.width + (x - b.minX); }
 }

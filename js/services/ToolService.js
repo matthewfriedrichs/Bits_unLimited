@@ -1,28 +1,16 @@
-import PenTool from '../tools/PenTool.js';
-import BucketTool from '../tools/BucketTool.js';
-import SelectTool from '../tools/SelectTool.js';
-import FrameTool from '../tools/FrameTool.js';
-import EyedropperTool from '../tools/EyedropperTool.js';
-
 export default class ToolService {
-    init(app) {
-        this.app = app;
-        this.bus = app.bus;
-        this.store = app.store;
-
-        this.tools = {
-            'pen': new PenTool(app),
-            'eraser': new PenTool(app, true),
-            'bucket': new BucketTool(app),
-            'select': new SelectTool(app),
-            'frame': new FrameTool(app),
-            'eyedropper': new EyedropperTool(app)
-        };
-
+    constructor() {
+        this.tools = {};
         this.currentToolId = null;
         this.clipboard = null;
         this.isPanning = false;
         this.lastPanPos = null;
+    }
+
+    init(app) {
+        this.app = app;
+        this.bus = app.bus;
+        this.store = app.store;
 
         // Input
         this.bus.on('input:pointerDown', p => this.handlePointerDown(p));
@@ -30,14 +18,33 @@ export default class ToolService {
         this.bus.on('input:pointerUp', p => this.handlePointerUp(p));
         this.bus.on('render', ctx => this.delegateRender(ctx));
 
-        // State Listeners
+        // State Listeners (Internal Reaction)
         this.bus.on('state:primaryTool', (id) => this._activateTool(id));
         this.bus.on('state:secondaryTool', (id) => this._activateTool(id));
 
-        // Mode Toggle Command
+        // --- TOOL COMMANDS (External Control) ---
+
+        // 1. Switch Tool
+        this.bus.on('cmd:selectTool', ({ id, isSecondary }) => {
+            const target = isSecondary ? 'secondaryTool' : 'primaryTool';
+            this.store.set(target, id);
+        });
+
+        // 2. Change Mode
         this.bus.on('cmd:toggleToolMode', (toolId) => {
             const tool = this.tools[toolId];
             if (tool && tool.toggleMode) tool.toggleMode();
+        });
+
+        this.bus.on('cmd:setToolMode', ({ toolId, mode }) => {
+            const tool = this.tools[toolId];
+            if (tool && tool.setMode) tool.setMode(mode);
+        });
+
+        // 3. Change Settings
+        this.bus.on('cmd:setToolSetting', ({ toolId, setting, value }) => {
+            const tool = this.tools[toolId];
+            if (tool && tool.setSetting) tool.setSetting(setting, value);
         });
 
         // Clipboard
@@ -47,6 +54,10 @@ export default class ToolService {
         this.bus.on('cmd:duplicate', () => this.handleDuplicate());
 
         this._activateTool(this.store.get('primaryTool'));
+    }
+
+    register(id, toolInstance) {
+        this.tools[id] = toolInstance;
     }
 
     // --- Input Logic ---
@@ -114,7 +125,6 @@ export default class ToolService {
     }
 
     delegateRender(ctx) {
-        // Render ALL tools to support secondary tool UI (e.g. Right-click selection box)
         Object.values(this.tools).forEach(tool => {
             if (tool.onRender) tool.onRender(ctx);
         });
@@ -125,19 +135,15 @@ export default class ToolService {
         if (tool && tool.onActivate) tool.onActivate();
     }
 
-    // --- Clipboard (Fixed for Secondary Tool) ---
+    // --- Clipboard ---
 
     handleCopy() {
-        // Try Primary First
         let tool = this.tools[this.store.get('primaryTool')];
         let data = tool && tool.copy ? tool.copy() : null;
-
-        // If no data (e.g. Pen tool or Empty Selection), try Secondary
         if (!data) {
             tool = this.tools[this.store.get('secondaryTool')];
             data = tool && tool.copy ? tool.copy() : null;
         }
-
         if (data) {
             this.clipboard = data;
             console.log("Copied", data.length, "pixels");
@@ -145,9 +151,7 @@ export default class ToolService {
     }
 
     handleCut() {
-        // Try Primary
         let tool = this.tools[this.store.get('primaryTool')];
-        // Check if it CAN copy and IF it has data
         if (tool && tool.copy) {
             let data = tool.copy();
             if (data) {
@@ -156,8 +160,6 @@ export default class ToolService {
                 return;
             }
         }
-
-        // Try Secondary
         tool = this.tools[this.store.get('secondaryTool')];
         if (tool && tool.copy) {
             let data = tool.copy();
@@ -172,24 +174,18 @@ export default class ToolService {
         if (this.clipboard) {
             const pId = this.store.get('primaryTool');
             const sId = this.store.get('secondaryTool');
-
-            // If Select tool is not active on EITHER button, assign to Primary
-            // If it IS active (e.g. on Right click), just use it as is.
             if (pId !== 'select' && sId !== 'select') {
                 this.store.set('primaryTool', 'select');
             }
-
             this.bus.emit('cmd:pasteBuffer', { buffer: this.clipboard, anchor: null });
         }
     }
 
     handleDuplicate() {
-        // 1. Try Copy from Primary
         let tool = this.tools[this.store.get('primaryTool')];
         let data = tool && tool.copy ? tool.copy() : null;
         let sourceTool = tool;
 
-        // 2. Try Copy from Secondary
         if (!data) {
             tool = this.tools[this.store.get('secondaryTool')];
             data = tool && tool.copy ? tool.copy() : null;
@@ -198,9 +194,6 @@ export default class ToolService {
 
         if (data) {
             let anchor = null;
-
-            // If the source was a selection tool, offset the duplicate slightly
-            // We check if the source tool has a 'selection' property to confirm
             if (sourceTool && sourceTool.selection) {
                 const s = sourceTool.selection;
                 anchor = {
@@ -208,14 +201,11 @@ export default class ToolService {
                     y: Math.floor(s.y + s.h / 2) + 10
                 };
             }
-
-            // Ensure Select tool is available to handle the floating buffer
             const pId = this.store.get('primaryTool');
             const sId = this.store.get('secondaryTool');
             if (pId !== 'select' && sId !== 'select') {
                 this.store.set('primaryTool', 'select');
             }
-
             this.bus.emit('cmd:pasteBuffer', { buffer: data, anchor: anchor });
         }
     }

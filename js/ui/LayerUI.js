@@ -8,8 +8,6 @@ export default class LayerUI {
         this.draggedIndex = null;
 
         const addBtn = document.getElementById('add-layer-btn');
-        // Removed addLocalBtn reference
-
         if (addBtn) addBtn.onclick = () => app.bus.emit('cmd:addLayer');
 
         // Subscribe to State Changes
@@ -54,18 +52,11 @@ export default class LayerUI {
             const onDragOver = (e) => {
                 e.preventDefault();
                 if (this.draggedIndex === realIndex) return;
-
                 e.dataTransfer.dropEffect = 'move';
-
-                // Visual indicator for where the drop will happen
                 const isMovingDown = this.draggedIndex > realIndex;
                 const borderClass = isMovingDown ? 'border-b-2' : 'border-t-2';
-
                 const oldClass = e.currentTarget.dataset.borderClass;
-                if (oldClass && oldClass !== borderClass) {
-                    e.currentTarget.classList.remove(oldClass);
-                }
-
+                if (oldClass && oldClass !== borderClass) e.currentTarget.classList.remove(oldClass);
                 e.currentTarget.classList.add(borderClass, 'border-sky-500');
                 e.currentTarget.dataset.borderClass = borderClass;
             };
@@ -79,9 +70,7 @@ export default class LayerUI {
                 e.preventDefault();
                 const cls = e.currentTarget.dataset.borderClass;
                 if (cls) e.currentTarget.classList.remove(cls, 'border-sky-500');
-
                 const fromIndex = parseInt(e.dataTransfer.getData('text/plain'));
-
                 if (!isNaN(fromIndex) && fromIndex !== realIndex) {
                     this.app.bus.emit('cmd:reorderLayers', { from: fromIndex, to: realIndex });
                 }
@@ -90,25 +79,20 @@ export default class LayerUI {
             // --- Rename Logic ---
             const startRenaming = (container) => {
                 const input = dom('input', {
-                    type: 'text',
-                    value: layer.name,
-                    // 'select-text' allows selection despite global select-none
+                    type: 'text', value: layer.name,
                     class: 'bg-neutral-900 text-white text-xs p-1 rounded border border-sky-500 outline-none w-full select-text',
                     onClick: (e) => e.stopPropagation(),
                     onDblClick: (e) => e.stopPropagation()
                 });
-
                 const save = () => {
                     if (input.value && input.value.trim() !== "" && input.value !== layer.name) {
                         this.app.bus.emit('cmd:renameLayer', { id: layer.id, name: input.value });
                     } else {
-                        this.render(); // Revert
+                        this.render();
                     }
                 };
-
                 input.onblur = save;
                 input.onkeydown = (e) => { if (e.key === 'Enter') save(); };
-
                 container.innerHTML = '';
                 container.appendChild(input);
                 input.focus();
@@ -116,7 +100,6 @@ export default class LayerUI {
             };
 
             // --- UI Elements ---
-
             const nameSpan = dom('span', {
                 class: `truncate ${!layer.visible ? 'text-neutral-500 line-through' : 'text-gray-200'}`,
             }, layer.name);
@@ -158,18 +141,12 @@ export default class LayerUI {
                 ondragleave: onDragLeave,
                 ondrop: onDrop,
                 onClick: () => {
-                    // Only update store if we are switching to a DIFFERENT layer to allow double-clicks to propagate
-                    if (project.activeLayerId !== layer.id) {
-                        project.activeLayerId = layer.id;
-                        this.app.store.set('projects', [...this.app.store.get('projects')]);
-                    }
+                    // REFACTOR: Use command instead of direct mutation
+                    this.app.bus.emit('cmd:selectLayer', layer.id);
                 }
             },
                 nameContainer,
-                dom('div', { class: 'flex gap-1 shrink-0' },
-                    visBtn,
-                    lockBtn
-                )
+                dom('div', { class: 'flex gap-1 shrink-0' }, visBtn, lockBtn)
             );
 
             this.list.appendChild(row);
